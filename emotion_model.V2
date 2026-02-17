@@ -1,0 +1,209 @@
+# model with 3 classes MobileNetV2 + openCV realtime capturing
+
+#nano train_model.py
+import tensorflow as tf
+from tensorflow.keras import layers, models
+import matplotlib.pyplot as plt
+import os
+
+# ===============================
+# CONFIGURATION
+# ===============================
+
+IMG_SIZE = 96
+BATCH_SIZE = 16
+EPOCHS = 15
+DATASET_PATH = "emotion_dataset"
+
+# ===============================
+# LOAD DATASET
+# ===============================
+
+train_ds = tf.keras.preprocessing.image_dataset_from_directory(
+    DATASET_PATH,
+    validation_split=0.2,
+    subset="training",
+    seed=123,
+    image_size=(IMG_SIZE, IMG_SIZE),
+    batch_size=BATCH_SIZE
+)
+
+val_ds = tf.keras.preprocessing.image_dataset_from_directory(
+    DATASET_PATH,
+    validation_split=0.2,
+    subset="validation",
+    seed=123,
+    image_size=(IMG_SIZE, IMG_SIZE),
+    batch_size=BATCH_SIZE
+)
+
+class_names = train_ds.class_names
+print("Classes:", class_names)
+
+# Improve performance
+AUTOTUNE = tf.data.AUTOTUNE
+train_ds = train_ds.prefetch(buffer_size=AUTOTUNE)
+val_ds = val_ds.prefetch(buffer_size=AUTOTUNE)
+
+# ===============================
+# DATA AUGMENTATION (IMPORTANT)
+# ===============================
+
+data_augmentation = tf.keras.Sequential([
+    layers.RandomFlip("horizontal"),
+    layers.RandomRotation(0.2),
+    layers.RandomZoom(0.2),
+    layers.RandomBrightness(0.2),
+    layers.RandomContrast(0.2),
+])
+
+# ===============================
+# LOAD PRETRAINED MOBILENETV2
+# ===============================
+
+base_model = tf.keras.applications.MobileNetV2(
+    input_shape=(IMG_SIZE, IMG_SIZE, 3),
+    include_top=False,
+    weights="imagenet"
+)
+
+base_model.trainable = False  # Freeze base model
+
+# ===============================
+# BUILD MODEL
+# ===============================
+
+model = models.Sequential([
+    layers.Rescaling(1./255),
+    data_augmentation,
+    base_model,
+    layers.GlobalAveragePooling2D(),
+    layers.Dense(64, activation="relu"),
+    layers.Dropout(0.4),
+    layers.Dense(4, activation="softmax")
+])
+
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
+    loss="sparse_categorical_crossentropy",
+    metrics=["accuracy"]
+)
+
+model.summary()
+
+# ===============================
+# TRAIN MODEL
+# ===============================
+
+history = model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=EPOCHS
+)
+
+# ===============================
+# SAVE MODEL
+# ===============================
+
+model.save("emotion_model.h5")
+print("Model saved as emotion_model.h5")
+
+# ===============================
+# PLOT TRAINING RESULTS
+# ===============================
+
+plt.plot(history.history['accuracy'], label='Train Accuracy')
+plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+plt.legend()
+plt.title("Training vs Validation Accuracy")
+plt.show()
+
+#....................................nano realtime_test.py.....................................................
+import cv2
+import numpy as np
+import tensorflow as tf
+
+# Load trained model
+model = tf.keras.models.load_model("emotion_model.h5")
+
+# Class names (MUST match folder order)
+classes = ["attentive", "confused", "distracted", "drowsy"]
+
+# Score mapping
+score_map = {
+    "attentive": 1.0,
+    "confused": 0.6,
+    "distracted": 0.4,
+    "drowsy": 0.2
+}
+
+# Load face detector
+face_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+)
+
+cap = cv2.VideoCapture(0)
+
+print("Press 'q' to quit")
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    # Detect faces
+    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+
+    total_score = 0
+    face_count = 0
+
+    for (x, y, w, h) in faces:
+
+        # Crop face
+        face = frame[y:y+h, x:x+w]
+        face = cv2.resize(face, (96, 96))
+        face = face.astype("float32") / 255.0
+        face = np.expand_dims(face, axis=0)
+
+        # Predict
+        prediction = model.predict(face, verbose=0)
+        label_index = np.argmax(prediction)
+        label = classes[label_index]
+        confidence = prediction[0][label_index] * 100
+
+        # Calculate score
+        total_score += score_map[label]
+        face_count += 1
+
+        # Draw rectangle
+        cv2.rectangle(frame, (x,y), (x+w,y+h), (0,255,0), 2)
+
+        # Show label
+        cv2.putText(frame,
+                    f"{label} ({confidence:.1f}%)",
+                    (x, y-10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0,255,0),
+                    2)
+
+    # Calculate classroom percentage
+    if face_count > 0:
+        class_percentage = (total_score / face_count) * 100
+        cv2.putText(frame,
+                    f"Class Attentiveness: {class_percentage:.1f}%",
+                    (30,40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0,0,255),
+                    3)
+
+    cv2.imshow("Classroom AI Monitoring", frame)
+
+    if cv2.waitKey(1) & 0xFF == ord("q"):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
