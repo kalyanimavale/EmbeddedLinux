@@ -16,7 +16,7 @@ presence” percentage for the class.
 The solution is implemented entirely at the edge without cloud dependency, ensuring
 low latency and data privacy.
 
-3. Problem Statement
+2. Problem Statement
 Traditional attendance and surveillance systems only confirm physical presence and
 do not measure engagement or attentiveness. Current engagement assessment
 methods are manual, subjective, and non-quantitative. Cloud-based AI monitoring
@@ -26,7 +26,25 @@ identifying them, and estimating engagement levels locally. The challenge is to
 implement such an intelligent vision system within the computational constraints of
 an embedded Linux platform.
 
-4. System Architecture4.Implementation Phases
+3. System Architecture
+
+Camera Sensor
+   ↓
+Linux Camera Driver (V4L2)
+   ↓
+Embedded Linux (Buildroot/Yocto)
+   ↓
+AI Inference Engine (Edge AI)
+   ↓
+Facial Recognition + Gesture Analysis
+   ↓
+Mental Presence Score Computation
+   ↓
+Application Layer (UI / Dashboard / Logs)
+
+
+
+4.Implementation Phases
 PHASE 1 — Hardware Setup (STM32MP157-DK2 + Camera)
 The implementation begins with preparing the hardware platform using the
 STM32MP157-DK2 development board. The board is powered using a 5V adapter
