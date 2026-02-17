@@ -1,0 +1,53 @@
+# 4 classes model code (failed)
+import tensorflow as tf
+from tensorflow.keras import layers, models
+
+IMG_SIZE = 96
+BATCH_SIZE = 32
+
+train_ds = tf.keras.preprocessing.image_dataset_from_directory(
+    "emotion_dataset",
+    validation_split=0.2,
+    subset="training",
+    seed=123,
+    image_size=(IMG_SIZE, IMG_SIZE),
+    batch_size=BATCH_SIZE
+)
+
+val_ds = tf.keras.preprocessing.image_dataset_from_directory(
+    "emotion_dataset",
+    validation_split=0.2,
+    subset="validation",
+    seed=123,
+    image_size=(IMG_SIZE, IMG_SIZE),
+    batch_size=BATCH_SIZE
+)
+
+base_model = tf.keras.applications.MobileNetV2(
+    input_shape=(IMG_SIZE, IMG_SIZE, 3),
+    include_top=False,
+    weights='imagenet'
+)
+
+base_model.trainable = False
+
+model = models.Sequential([
+    base_model,
+    layers.GlobalAveragePooling2D(),
+    layers.Dense(64, activation='relu'),
+    layers.Dense(4, activation='softmax')
+])
+
+model.compile(
+    optimizer='adam',
+    loss='sparse_categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+history = model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=15
+)
+
+model.save("emotion_model.h5")
