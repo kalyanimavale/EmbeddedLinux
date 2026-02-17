@@ -1,29 +1,33 @@
 # model with 3 classes MobileNetV2 + openCV realtime capturing
 
-#nano train_model.py
+#...................................nano train_model.py....................................
 import tensorflow as tf
-from tensorflow.keras import layers, models
-import matplotlib.pyplot as plt
-import os
+from tensorflow.keras import layers
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+import numpy as np
+from sklearn.utils.class_weight import compute_class_weight
 
-# ===============================
+# ==========================
 # CONFIGURATION
-# ===============================
+# ==========================
 
 IMG_SIZE = 96
-BATCH_SIZE = 16
-EPOCHS = 15
-DATASET_PATH = "emotion_dataset"
+BATCH_SIZE = 32
+DATASET_PATH = "fer_dataset"
+EPOCHS_STAGE1 = 30
+EPOCHS_STAGE2 = 30
 
-# ===============================
+print("Loading FER dataset...")
+
+# ==========================
 # LOAD DATASET
-# ===============================
+# ==========================
 
 train_ds = tf.keras.preprocessing.image_dataset_from_directory(
     DATASET_PATH,
     validation_split=0.2,
     subset="training",
-    seed=123,
+    seed=42,
     image_size=(IMG_SIZE, IMG_SIZE),
     batch_size=BATCH_SIZE
 )
@@ -32,34 +36,47 @@ val_ds = tf.keras.preprocessing.image_dataset_from_directory(
     DATASET_PATH,
     validation_split=0.2,
     subset="validation",
-    seed=123,
+    seed=42,
     image_size=(IMG_SIZE, IMG_SIZE),
     batch_size=BATCH_SIZE
 )
 
 class_names = train_ds.class_names
-print("Classes:", class_names)
+print("Emotion Classes:", class_names)
 
-# Improve performance
 AUTOTUNE = tf.data.AUTOTUNE
-train_ds = train_ds.prefetch(buffer_size=AUTOTUNE)
-val_ds = val_ds.prefetch(buffer_size=AUTOTUNE)
+train_ds = train_ds.prefetch(AUTOTUNE)
+val_ds = val_ds.prefetch(AUTOTUNE)
 
-# ===============================
-# DATA AUGMENTATION (IMPORTANT)
-# ===============================
+# ==========================
+# COMPUTE CLASS WEIGHTS
+# ==========================
+
+labels = np.concatenate([y.numpy() for x, y in train_ds], axis=0)
+
+class_weights = compute_class_weight(
+    class_weight="balanced",
+    classes=np.unique(labels),
+    y=labels
+)
+
+class_weights = dict(enumerate(class_weights))
+print("Class Weights:", class_weights)
+
+# ==========================
+# DATA AUGMENTATION
+# ==========================
 
 data_augmentation = tf.keras.Sequential([
     layers.RandomFlip("horizontal"),
     layers.RandomRotation(0.2),
     layers.RandomZoom(0.2),
-    layers.RandomBrightness(0.2),
     layers.RandomContrast(0.2),
 ])
 
-# ===============================
-# LOAD PRETRAINED MOBILENETV2
-# ===============================
+# ==========================
+# LOAD PRETRAINED MODEL
+# ==========================
 
 base_model = tf.keras.applications.MobileNetV2(
     input_shape=(IMG_SIZE, IMG_SIZE, 3),
@@ -67,21 +84,48 @@ base_model = tf.keras.applications.MobileNetV2(
     weights="imagenet"
 )
 
-base_model.trainable = False  # Freeze base model
+base_model.trainable = False
 
-# ===============================
+# ==========================
 # BUILD MODEL
-# ===============================
+# ==========================
 
-model = models.Sequential([
-    layers.Rescaling(1./255),
-    data_augmentation,
-    base_model,
-    layers.GlobalAveragePooling2D(),
-    layers.Dense(64, activation="relu"),
-    layers.Dropout(0.4),
-    layers.Dense(4, activation="softmax")
-])
+inputs = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+x = layers.Rescaling(1./255)(inputs)
+x = data_augmentation(x)
+x = base_model(x, training=False)
+x = layers.GlobalAveragePooling2D()(x)
+x = layers.Dense(256, activation="relu")(x)
+x = layers.Dropout(0.5)(x)
+outputs = layers.Dense(len(class_names), activation="softmax")(x)
+
+model = tf.keras.Model(inputs, outputs)
+
+# ==========================
+# CALLBACKS
+# ==========================
+
+early_stop = EarlyStopping(monitor="val_loss", patience=7, restore_best_weights=True)
+
+reduce_lr = ReduceLROnPlateau(
+    monitor="val_loss",
+    factor=0.3,
+    patience=4,
+    min_lr=1e-6
+)
+
+checkpoint = ModelCheckpoint(
+    "best_fer_model.h5",
+    monitor="val_accuracy",
+    save_best_only=True,
+    mode="max"
+)
+
+# ==========================
+# STAGE 1 TRAINING
+# ==========================
+
+print("Stage 1: Training classifier head")
 
 model.compile(
     optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
@@ -89,62 +133,73 @@ model.compile(
     metrics=["accuracy"]
 )
 
-model.summary()
-
-# ===============================
-# TRAIN MODEL
-# ===============================
-
-history = model.fit(
+model.fit(
     train_ds,
     validation_data=val_ds,
-    epochs=EPOCHS
+    epochs=EPOCHS_STAGE1,
+    callbacks=[early_stop, reduce_lr, checkpoint],
+    class_weight=class_weights
 )
 
-# ===============================
-# SAVE MODEL
-# ===============================
+# ==========================
+# STAGE 2 FINE TUNING
+# ==========================
 
-model.save("emotion_model.h5")
-print("Model saved as emotion_model.h5")
+print("Stage 2: Fine tuning deeper layers")
 
-# ===============================
-# PLOT TRAINING RESULTS
-# ===============================
+base_model.trainable = True
 
-plt.plot(history.history['accuracy'], label='Train Accuracy')
-plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
-plt.legend()
-plt.title("Training vs Validation Accuracy")
-plt.show()
+# Freeze first layers, train last ~25 layers
+for layer in base_model.layers[:-25]:
+    layer.trainable = False
 
-#....................................nano realtime_test.py.....................................................
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
+    loss="sparse_categorical_crossentropy",
+    metrics=["accuracy"]
+)
+
+model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=EPOCHS_STAGE2,
+    callbacks=[early_stop, reduce_lr, checkpoint],
+    class_weight=class_weights
+)
+
+model.save("strong_fer_model.h5")
+
+print("Strong FER model training complete.")
+
+
+#..............................realtime_test.py................................
 import cv2
 import numpy as np
 import tensorflow as tf
 
-# Load trained model
-model = tf.keras.models.load_model("emotion_model.h5")
+# ============================
+# LOAD TRAINED EMOTION MODEL
+# ============================
 
-# Class names (MUST match folder order)
-classes = ["attentive", "confused", "distracted", "drowsy"]
+model = tf.keras.models.load_model("strong_fer_model.h5")
 
-# Score mapping
-score_map = {
-    "attentive": 1.0,
-    "confused": 0.6,
-    "distracted": 0.4,
-    "drowsy": 0.2
-}
+# Emotion order MUST match training folder order
+emotion_classes = ["angry","disgust","fear","happy","sad","surprise","neutral"]
 
-# Load face detector
+# ============================
+# FACE DETECTOR
+# ============================
+
 face_cascade = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 )
 
 cap = cv2.VideoCapture(0)
 
-print("Press 'q' to quit")
+# For smoothing output
+score_history = []
+
+print("Press 'q' to exit")
 
 while True:
     ret, frame = cap.read()
@@ -152,58 +207,102 @@ while True:
         break
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    # Detect faces
     faces = face_cascade.detectMultiScale(gray, 1.3, 5)
 
     total_score = 0
-    face_count = 0
+    count = 0
 
-    for (x, y, w, h) in faces:
-
-        # Crop face
+    for (x,y,w,h) in faces:
         face = frame[y:y+h, x:x+w]
-        face = cv2.resize(face, (96, 96))
+        face = cv2.resize(face, (96,96))
         face = face.astype("float32") / 255.0
         face = np.expand_dims(face, axis=0)
 
-        # Predict
-        prediction = model.predict(face, verbose=0)
-        label_index = np.argmax(prediction)
-        label = classes[label_index]
-        confidence = prediction[0][label_index] * 100
+        prediction = model.predict(face, verbose=0)[0]
 
-        # Calculate score
-        total_score += score_map[label]
-        face_count += 1
+        # Extract probabilities
+        angry = prediction[0]
+        disgust = prediction[1]
+        fear = prediction[2]
+        happy = prediction[3]
+        sad = prediction[4]
+        surprise = prediction[5]
+        neutral = prediction[6]
 
-        # Draw rectangle
+        # ============================
+        # YOUR GROUPING LOGIC
+        # ============================
+
+        attentive = happy + neutral
+        attentive_no_understanding = sad + fear
+        disattentive = angry + disgust
+
+        # Normalize (important for stability)
+        total = attentive + attentive_no_understanding + disattentive
+
+        if total > 0:
+            attentive /= total
+            attentive_no_understanding /= total
+            disattentive /= total
+
+        # ============================
+        # WEIGHTED MENTAL SCORE
+        # ============================
+
+        mental_score = (
+            1.0 * attentive +
+            0.6 * attentive_no_understanding +
+            0.2 * disattentive
+        )
+
+        mental_percentage = mental_score * 100
+
+        total_score += mental_percentage
+        count += 1
+
+        # Draw bounding box
         cv2.rectangle(frame, (x,y), (x+w,y+h), (0,255,0), 2)
 
-        # Show label
         cv2.putText(frame,
-                    f"{label} ({confidence:.1f}%)",
-                    (x, y-10),
+                    f"Mental: {mental_percentage:.1f}%",
+                    (x,y-10),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.7,
                     (0,255,0),
                     2)
 
-    # Calculate classroom percentage
-    if face_count > 0:
-        class_percentage = (total_score / face_count) * 100
+    # ============================
+    # CLASSROOM AVERAGE SCORE
+    # ============================
+
+    if count > 0:
+        class_percentage = total_score / count
+
+        # Smooth over last 10 frames
+        score_history.append(class_percentage)
+        if len(score_history) > 10:
+            score_history.pop(0)
+
+        smoothed_score = sum(score_history) / len(score_history)
+
         cv2.putText(frame,
-                    f"Class Attentiveness: {class_percentage:.1f}%",
+                    f"Class Mental Attendance: {smoothed_score:.1f}%",
                     (30,40),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     1,
                     (0,0,255),
                     3)
 
-    cv2.imshow("Classroom AI Monitoring", frame)
+    cv2.imshow("Classroom Mental Monitoring", frame)
 
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
 cap.release()
 cv2.destroyAllWindows()
+
+
+
+
+
+
